@@ -1,5 +1,4 @@
-﻿{$reference System.Windows.Forms.dll}
-{$apptype windows}
+﻿unit EM;
 
 {$region NodeTypes}
 
@@ -8,7 +7,10 @@ type
     k: real;
     
     static otp := true;
-    static otp_x1 := true;
+    
+    static otp_calc := false;
+    static otp_calc_v := Dict( ('a'+'',3.0), ('x'+'',3.0) );
+    
     static force_br := false;
     
     constructor(k: real) :=
@@ -28,13 +30,9 @@ type
         {$region Debug}
         if otp then
         begin
-          Result.Reconstruct.Println;
-          if otp_x1 then
-          begin
-            otp := false;
-            Result.ReplaceVar('x','1').FullOptimize.Reconstruct.Println;
-            otp := true;
-          end;
+          Result.Println;
+          if otp_calc then
+            Result.Calc(otp_calc_v).Println;
         end;
         {$endregion Debug}
         last := Result;
@@ -46,7 +44,15 @@ type
     function IsSame(n: ExprNode): boolean; abstract;
     function IsContentSame(n: ExprNode): boolean; abstract;
     
+    function Calc(vars: Dictionary<string,real>): real; abstract;
+    function Calc(params vars: array of (string,real)) := Calc(Dict(vars));
+    
     function Reconstruct(br_req: integer := 0): string; abstract;
+    function Println: ExprNode;
+    begin
+      Reconstruct.Println;
+      Result := self;
+    end;
     
     static function FromStr(s: string): ExprNode;
     
@@ -94,6 +100,15 @@ type
     (n is BaseNode(var tn)) and
     (tn.vname=self.vname);
     
+    function Calc(vars: Dictionary<string,real>): real; override;
+    begin
+      if vname=nil then
+        Result := k else
+      if vars.TryGetValue(vname,Result) then
+        Result *= k else
+        raise new Exception($'Значение переменной "{vname}" не указано');
+    end;
+    
     function Reconstruct(br_req: integer := 0): string; override;
     begin
       var res := new List<string>;
@@ -120,6 +135,7 @@ type
     function IsSame(n: ExprNode): boolean; override :=
     (n?.GetType = self.GetType) and (n is ContNode(var tn)) and
     (tn.k = self.k) and
+    (tn.pns.Count=self.pns.Count) and (tn.nns.Count=self.nns.Count) and
     tn.pns.ZipTuple(self.pns).All(t->t[0].IsSame(t[1])) and
     tn.nns.ZipTuple(self.nns).All(t->t[0].IsSame(t[1]));
     
@@ -220,17 +236,20 @@ type
       foreach var n in self.pns do res.Add(true, n.Optimize);
       foreach var n in self.nns do res.Add(false, n.Optimize);
       
-      res.pns.RemoveAll(n->n.LiteralEq(0));
-      res.nns.RemoveAll(n->n.LiteralEq(0));
+      {$region Сложение констант}
       
-      var l := new BaseNode(0);
-      for var i := res.pns.Count-1 downto 0 do
-        if (res.pns[i] is BaseNode(var tn)) and (tn.vname=nil) then
-        begin
-          res.pns.RemoveAt(i);
-          l.k += tn.k;
-        end;
-      if l.k<>0 then res.pns.Insert(0,l);
+      begin
+        var l := new BaseNode(0);
+        for var i := res.pns.Count-1 downto 0 do
+          if (res.pns[i] is BaseNode(var tn)) and (tn.vname=nil) then
+          begin
+            res.pns.RemoveAt(i);
+            l.k += tn.k;
+          end;
+        if l.k<>0 then res.pns.Insert(0,l);
+      end;
+      
+      {$endregion Сложение констант}
       
       if (res.pns.Count=0) and (res.nns.Count=0) then
         Result := new BaseNode(0) else
@@ -240,6 +259,9 @@ type
         Result := res.nns.Single.MltK(-res.k) else
         Result := res;
     end;
+    
+    function Calc(vars: Dictionary<string,real>): real; override :=
+    self.k*( pns.Select(n->n.Calc(vars)).Sum - nns.Select(n->n.Calc(vars)).Sum );
     
     function Reconstruct(br_req: integer := 0): string; override;
     begin
@@ -339,6 +361,9 @@ type
       end;
     end;
     
+    function Calc(vars: Dictionary<string,real>): real; override :=
+    self.k * pns.Select(n->n.Calc(vars)).Product / nns.Select(n->n.Calc(vars)).Product;
+    
     function Reconstruct(br_req: integer := 0): string; override;
     begin
       var res := new StringBuilder;
@@ -361,6 +386,12 @@ type
   
   FuncNode = sealed class(ContNode)
     fname: string;
+    
+    function IsSame(n: ExprNode): boolean; override :=
+    inherited IsSame(n) and (FuncNode(n).fname=self.fname);
+    
+    function IsContentSame(n: ExprNode): boolean; override :=
+    inherited IsContentSame(n) and (FuncNode(n).fname=self.fname);
     
     procedure Add(positive: boolean; n: ExprNode); override :=
     pns += n;
@@ -394,6 +425,42 @@ type
       end;
       
       Result := res;
+    end;
+    
+    function Calc(vars: Dictionary<string,real>): real; override;
+    begin
+      var param := pns.ConvertAll(n->n.Calc(vars));
+      
+      case fname.ToLower of
+        
+        'sqr':
+        begin
+          if param.Count<>1 then raise new Exception($'У sqr должен быть только 1 параметр, в >>> {Reconstruct()} <<<');
+          Result := sqr(param[0]);
+        end;
+        
+        'sqrt':
+        begin
+          if param.Count<>1 then raise new Exception($'У sqrt должен быть только 1 параметр, в >>> {Reconstruct()} <<<');
+          Result := sqrt(param[0]);
+        end;
+        
+        'sin':
+        begin
+          if param.Count<>1 then raise new Exception($'У sin должен быть только 1 параметр, в >>> {Reconstruct()} <<<');
+          Result := sin(param[0]);
+        end;
+        
+        'cos':
+        begin
+          if param.Count<>1 then raise new Exception($'У cos должен быть только 1 параметр, в >>> {Reconstruct()} <<<');
+          Result := cos(param[0]);
+        end;
+        
+        else raise new Exception($'Неизвестная функция "{fname}"');
+      end;
+      
+      Result *= self.k;
     end;
     
     function Reconstruct(br_req: integer := 0): string; override;
@@ -511,34 +578,4 @@ end;
 
 {$endregion Parser}
 
-begin
-  try
-//    ExprNode.otp := false;
-//    ExprNode.FromStr('sqr(x/(x*x+1))+sqr(1/(x*x+1)-1)').ReplaceVar('x','1').FullOptimize.Reconstruct.Println;
-//    exit;
-    
-//    var e := ExprNode.FromStr('+x*( 1-2*sqr(sin(a/2))*( u.val2*u.val2 + u.val1*u.val1 ) ) + 1*( -sin(a)*u.val1 + 2*sqr(sin(a/2))*( u.val2*u.val0 ) )');
-    var e := ExprNode.FromStr('sqr(x*2/(x*x+1))+sqr(2/(x*x+1)-1)');
-    e := e.FullOptimize;
-    e.Reconstruct.Println;
-    
-    ExprNode.otp := false;
-    
-    Writeln('='*50);
-    
-//    foreach var se in e.EnmrExpr do
-//      $'>>> {se.Reconstruct()} ::: {se.ReplaceVar(''x'',''1'').FullOptimize.Reconstruct()} <<<'.Println;
-//    Writeln('='*50);
-    
-    e.ReplaceVar('x','1').FullOptimize.Reconstruct.Println;
-    
-    System.Windows.Forms.Clipboard.SetText(e.Reconstruct);
-    System.Console.Beep;
-  except
-    on e: Exception do
-    begin
-      Writeln(e);
-      Readln;
-    end;
-  end;
 end.
